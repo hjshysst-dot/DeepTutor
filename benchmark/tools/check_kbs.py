@@ -255,42 +255,50 @@ def print_report(report: dict) -> str:
     return "error" if issues else ("warn" if warnings else "ok")
 
 
-def _ensure_env_loaded() -> None:
-    """Load .env files the same way rag_tool does."""
-    from dotenv import load_dotenv
-
-    load_dotenv(_PROJECT_ROOT / "DeepTutor.env", override=False)
-    load_dotenv(_PROJECT_ROOT / ".env", override=False)
-    load_dotenv(_PROJECT_ROOT.parent / ".env", override=False)
+_RAG_TOOL_SCRIPT = _PROJECT_ROOT / "src" / "tools" / "rag_tool.py"
 
 
 async def _test_rag_query(kb_name: str, kb_base_dir: str, timeout: float = 60.0) -> tuple[bool, str]:
-    """Run a simple RAG query against a KB to verify it's actually usable.
+    """Run rag_tool.py as a subprocess to test if a KB is queryable.
 
     Returns (success, message).
     """
-    from src.tools.rag_tool import rag_search
-
-    query = "What is the main topic of this document?"
+    cmd = [
+        sys.executable,
+        str(_RAG_TOOL_SCRIPT),
+        "--kb-name", kb_name,
+        "--kb-base-dir", kb_base_dir,
+        "--query", "What is the main topic of this document?",
+        "--mode", "naive",
+    ]
     t0 = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            rag_search(
-                query=query,
-                kb_name=kb_name,
-                mode="naive",
-                kb_base_dir=kb_base_dir,
-                only_need_context=True,
-            ),
-            timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(_PROJECT_ROOT),
         )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         elapsed = time.monotonic() - t0
-        answer = (result.get("answer") or result.get("content") or "").strip()
-        if not answer:
-            return False, f"empty response ({elapsed:.1f}s)"
-        preview = answer[:80].replace("\n", " ")
-        return True, f"ok ({elapsed:.1f}s) — {preview}…"
+
+        if proc.returncode != 0:
+            err_line = (stderr or stdout or b"").decode(errors="replace").strip().split("\n")[-1][:120]
+            return False, f"exit code {proc.returncode} ({elapsed:.1f}s): {err_line}"
+
+        output = stdout.decode(errors="replace")
+        for line in output.splitlines():
+            if line.startswith("Answer:"):
+                answer = line[len("Answer:"):].strip()
+                if not answer:
+                    return False, f"empty answer ({elapsed:.1f}s)"
+                preview = answer[:80].replace("\n", " ")
+                return True, f"ok ({elapsed:.1f}s) — {preview}…"
+
+        return False, f"no Answer line in output ({elapsed:.1f}s)"
     except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
         return False, f"timeout (>{timeout:.0f}s)"
     except Exception as e:
         msg = str(e).split("\n")[0][:120]
@@ -387,7 +395,6 @@ async def main():
         _print_final_summary(groups, rag_results=None)
         sys.exit(1 if groups["error"] else 0)
 
-    _ensure_env_loaded()
     logging.disable(logging.CRITICAL)
 
     print(f"\n{'=' * 60}")
