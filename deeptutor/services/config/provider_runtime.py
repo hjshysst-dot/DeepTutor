@@ -21,7 +21,7 @@ from .env_store import EnvStore, get_env_store
 from .loader import load_config_with_main
 from .model_catalog import ModelCatalogService, get_model_catalog_service
 
-SUPPORTED_SEARCH_PROVIDERS = {"brave", "tavily", "jina", "searxng", "duckduckgo", "perplexity", "serper"}
+SUPPORTED_SEARCH_PROVIDERS = {"brave", "tavily", "jina", "searxng", "duckduckgo", "perplexity", "serper", "minimax"}
 DEPRECATED_SEARCH_PROVIDERS = {"exa", "baidu", "openrouter"}
 
 SEARCH_ENV_FALLBACK = {
@@ -30,6 +30,7 @@ SEARCH_ENV_FALLBACK = {
     "jina": ("JINA_API_KEY",),
     "perplexity": ("PERPLEXITY_API_KEY",),
     "serper": ("SERPER_API_KEY",),
+    "minimax": ("MINIMAX_API_KEY",),
 }
 
 LLM_LOCALHOST_PROVIDERS = ("ollama", "vllm")

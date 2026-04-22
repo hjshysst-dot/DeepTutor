@@ -148,6 +148,9 @@ def get_default_provider(**kwargs) -> BaseSearchProvider:
 def _register_builtin_providers() -> None:
     # Import for side effects (register_provider decorators).
     from . import brave, duckduckgo, jina, perplexity, searxng, serper, tavily
+    from .minimax import MiniMaxSearchProvider
+    from . import register_provider
+    register_provider("minimax")(MiniMaxSearchProvider)
 
     _ = (brave, duckduckgo, jina, perplexity, searxng, serper, tavily)
 

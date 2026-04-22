@@ -61,7 +61,7 @@ def main() -> None:
         "deeptutor.api.main:app",
         host="0.0.0.0",
         port=backend_port,
-        reload=True,
+        reload=False,
         reload_excludes=reload_excludes,
         log_level="info",
         access_log=False,

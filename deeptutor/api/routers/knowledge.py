@@ -32,8 +32,8 @@ from deeptutor.knowledge.add_documents import DocumentAdder
 from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
 from deeptutor.knowledge.manager import KnowledgeBaseManager
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
-from deeptutor.services.rag.file_routing import FileTypeRouter
-from deeptutor.services.rag.factory import DEFAULT_PROVIDER
+from deeptutor.services.rag.components.routing import FileTypeRouter
+from deeptutor.services.rag.factory import DEFAULT_PROVIDER, has_pipeline, normalize_provider_name
 from deeptutor.utils.document_validator import DocumentValidator
 from deeptutor.utils.error_utils import format_exception_message
 
@@ -110,6 +110,7 @@ def _save_uploaded_files(
     target_dir: Path,
     allowed_extensions: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
+    """Save uploaded files, automatically splitting large PDFs into chunks."""
     uploaded_files: list[str] = []
     uploaded_file_paths: list[str] = []
 
@@ -129,19 +130,55 @@ def _save_uploaded_files(
             with open(file_path, "wb") as buffer:
                 for chunk in iter(lambda: file.file.read(8192), b""):
                     written_bytes += len(chunk)
-                    if written_bytes > max_size:
-                        size_str = format_bytes_human_readable(max_size)
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"File '{sanitized_filename}' exceeds maximum size limit of {size_str}",
-                        )
                     buffer.write(chunk)
 
             DocumentValidator.validate_upload_safety(
                 sanitized_filename, written_bytes, allowed_extensions=allowed_extensions
             )
-            uploaded_files.append(sanitized_filename)
-            uploaded_file_paths.append(str(file_path))
+
+            # Auto-split large PDFs (>100MB) into smaller chunks
+            is_large_pdf = (
+                written_bytes > max_size
+                and sanitized_filename.lower().endswith(".pdf")
+            )
+
+            if is_large_pdf:
+                logger.info(
+                    f"Auto-splitting large PDF: {sanitized_filename} "
+                    f"({written_bytes / 1024 / 1024:.1f}MB)"
+                )
+                try:
+                    from deeptutor.utils.pdf_splitter import split_pdf_by_size
+
+                    chunks = split_pdf_by_size(file_path, target_dir)
+                    # Remove the original temp file
+                    os.unlink(file_path)
+                    # Add all chunk files
+                    for chunk_path, _ in chunks:
+                        uploaded_files.append(chunk_path.name)
+                        uploaded_file_paths.append(str(chunk_path))
+                    logger.info(
+                        f"Split into {len(chunks)} chunks: {[c[0].name for c in chunks]}"
+                    )
+                except Exception as split_err:
+                    logger.error(f"Failed to split PDF: {split_err}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to split PDF '{sanitized_filename}': {split_err}. "
+                               f"Please split it manually into files under 100MB."
+                    )
+            else:
+                if written_bytes > max_size:
+                    size_str = format_bytes_human_readable(max_size)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"File '{sanitized_filename}' exceeds maximum size limit of {size_str}",
+                    )
+                uploaded_files.append(sanitized_filename)
+                uploaded_file_paths.append(str(file_path))
+
+        except HTTPException:
+            raise
         except Exception as e:
             if file_path and file_path.exists():
                 try:
@@ -171,8 +208,23 @@ def _task_log(task_id: str, message: str, level: str = "info") -> None:
 
 
 def _validate_registered_provider(raw_provider: str | None) -> str:
-    """Always return the canonical provider; field is kept as a stub."""
-    return DEFAULT_PROVIDER
+    candidate = (raw_provider or DEFAULT_PROVIDER).strip().lower()
+    if not candidate:
+        candidate = DEFAULT_PROVIDER
+
+    if not has_pipeline(candidate):
+        from deeptutor.services.rag.service import RAGService
+
+        available_providers = [item["id"] for item in RAGService.list_providers()]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported RAG provider '{candidate}'. "
+                f"Available providers: {available_providers}"
+            ),
+        )
+
+    return normalize_provider_name(candidate)
 
 
 def _load_kb_entry_or_404(manager: KnowledgeBaseManager, kb_name: str) -> dict:
@@ -641,7 +693,7 @@ async def upload_files(
                     "Update KB config first."
                 ),
             )
-        allowed_extensions = FileTypeRouter.get_supported_extensions()
+        allowed_extensions = FileTypeRouter.get_extensions_for_provider(kb_provider)
         uploaded_files, uploaded_file_paths = _save_uploaded_files(
             files, raw_dir, allowed_extensions=allowed_extensions
         )
@@ -731,7 +783,7 @@ async def create_knowledge_base(
             logger.warning(f"KB {name} not found in config, registering manually")
             initializer._register_to_config()
 
-        allowed_extensions = FileTypeRouter.get_supported_extensions()
+        allowed_extensions = FileTypeRouter.get_extensions_for_provider(rag_provider)
         uploaded_files, _ = _save_uploaded_files(
             files, initializer.raw_dir, allowed_extensions=allowed_extensions
         )
